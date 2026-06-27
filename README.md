@@ -26,18 +26,18 @@ concrete agent classes.
         │  chat input · live per-agent steps · settings         │
         └───────────────────────────┬───────────────────────────┘
                         ┌────────────▼────────────┐
-                        │   Supervisor             │
-                        │  Researcher⇄Critic (≤3)  │
-                        │     → Summarizer docs     │
-                        └───┬───────────────────┬───┘
+                        │   Supervisor            │
+                        │ Researcher⇄Critic (≤3)  │
+                            → Summarizer docs     │
+                        └───┬───────────────────┬─┘
               AgentRegistry │                   │ shared deps
         ┌─────────────┬─────▼─────┬─────────────┘
         │ Researcher  │  Critic   │  Summarizer        ← src/agentic_kris/agents
         └──────┬──────┴─────┬─────┴──────┬──────┐
-               │ uses skills (SkillLoader)│      │
+               │uses skills (SkillLoader)│      │
         ┌──────▼──────────────────────────▼──────▼──┐
         │ LLMProvider (ollama|anthropic) · Retriever │ ← llm / rag
-        │                         (in-memory → pgvector)
+        │            (in-memory → pgvector)
         └────────────────────────────────────────────┘
 ```
 
@@ -85,7 +85,7 @@ cp .env.example .env                 # Windows: copy .env.example .env
 
 ```bash
 python run.py                # start (foreground) → http://localhost:8000  (any OS)
-python run.py start          # same as above
+x§          # same as above
 python run.py status         # is the server up? (prints PID)
 python run.py stop           # stop a running server on $PORT
 python run.py restart        # stop, then start
