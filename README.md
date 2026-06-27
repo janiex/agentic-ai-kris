@@ -84,12 +84,23 @@ cp .env.example .env                 # Windows: copy .env.example .env
 ## Run
 
 ```bash
-python run.py                # → http://localhost:8000   (any OS)
-PORT=8600 python run.py      # custom port
-./run.sh                     # Unix convenience wrapper (activates .venv)
+python run.py                # start (foreground) → http://localhost:8000  (any OS)
+python run.py start          # same as above
+python run.py status         # is the server up? (prints PID)
+python run.py stop           # stop a running server on $PORT
+python run.py restart        # stop, then start
+PORT=8600 python run.py      # custom port (applies to every command)
+./run.sh [start|stop|status|restart]   # Unix wrapper (activates .venv)
 ```
 
-Then open the URL, type a topic (e.g. *"Design a caching layer for a read-heavy
+- In the **foreground**, press `Ctrl+C` to stop. `stop` is for servers started in
+  the background (`python run.py start &`) or another terminal; it finds the
+  process on `$PORT`, stops it gracefully (SIGTERM→SIGKILL / `taskkill` on
+  Windows), and confirms the port is free.
+- The future RAG datastore (only after `docker compose up -d`) is stopped with
+  `docker compose down`.
+
+Open the URL, type a topic (e.g. *"Design a caching layer for a read-heavy
 API"*), and watch the Researcher → Critic loop and the Summarizer's final
 document stream in.
 

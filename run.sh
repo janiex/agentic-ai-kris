@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Convenience launcher for Unix (Linux/macOS). Windows users: `python run.py`.
+# Convenience wrapper for Unix (Linux/macOS). Windows users: `python run.py`.
+# Forwards all arguments, so: ./run.sh [start|stop|status|restart] [--watch]
 set -euo pipefail
 cd "$(dirname "$0")"
 

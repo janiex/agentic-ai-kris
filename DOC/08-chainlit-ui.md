@@ -75,25 +75,49 @@ Summarizer's output streams into the **main answer message**. The whole
 `on_message` body is wrapped in try/except so any backend error surfaces as a
 chat message instead of a stack trace.
 
-## 8.6 Launchers
+## 8.6 Launchers and lifecycle
 
-- `run.py` — pure-Python, cross-platform; shells out to
-  `python -m chainlit run app.py --port $PORT`. `--watch` adds auto-reload.
-- `run.sh` — Unix convenience wrapper that activates `.venv` then calls `run.py`.
-- `chainlit.md` — the welcome screen shown in the UI.
+`run.py` is a pure-Python, cross-platform lifecycle manager (no extra deps). The
+port comes from `$PORT` (default 8000) and applies to every command.
+
+| Command | What it does |
+| --- | --- |
+| `python run.py` / `python run.py start` | start the server in the **foreground** (Ctrl+C to stop); `--watch` adds auto-reload |
+| `python run.py status` | print `● running … (PID …)` or `○ stopped`; exit code 0/1 |
+| `python run.py stop` | stop the server on `$PORT` gracefully (SIGTERM→SIGKILL; `taskkill /T /F` on Windows) and confirm the port is free |
+| `python run.py restart` | `stop` then `start` |
+
+How it works:
+
+- **start** refuses to launch if `$PORT` is already in use, spawns
+  `python -m chainlit run app.py --port $PORT`, and records `"<pid> <port>"` in
+  `.run.pid` (gitignored). On foreground exit / Ctrl+C it cleans the pidfile.
+- **stop / status** locate the live process by **port** first — `lsof -ti
+  tcp:$PORT -sTCP:LISTEN` on Unix, `netstat -ano` on Windows — and fall back to
+  `.run.pid` if those tools aren't present. `status` also does a quick socket
+  connect to `127.0.0.1:$PORT` to decide up/down.
+
+`run.sh` is a Unix wrapper that activates `.venv` and forwards all arguments, so
+`./run.sh stop`, `./run.sh status`, etc. work too. `chainlit.md` is the welcome
+screen shown in the UI.
+
+> **Foreground vs background.** In the foreground, `Ctrl+C` is the natural stop.
+> `stop` exists for servers launched in the background (`python run.py start &`)
+> or from another terminal. The in-memory RAG stub lives inside the process, so
+> stopping the process is a complete shutdown — there are no leftover workers.
+> The future Postgres+pgvector store is separate: `docker compose down`.
 
 ### 🧪 Experiment — start the UI and probe it without a browser
 
 ```bash
-PORT=8780 python run.py > /tmp/kris-ui.log 2>&1 &
+export PORT=8780
+python run.py start > /tmp/kris-ui.log 2>&1 &
 # wait for readiness
-for i in $(seq 1 20); do
-  [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8780/)" = "200" ] && break
-  sleep 1
-done
+for i in $(seq 1 20); do python run.py status >/dev/null 2>&1 && break; sleep 1; done
+python run.py status                          # ● running … (PID …)
 curl -s -o /dev/null -w 'root HTTP %{http_code}\n' http://localhost:8780/
-grep -c Traceback /tmp/kris-ui.log    # expect 0 on Python 3.10–3.13
-pkill -f "chainlit run"
+grep -c Traceback /tmp/kris-ui.log            # expect 0 on Python 3.10–3.13
+python run.py stop                            # ■ stopped, port freed
 ```
 
 ### 🧪 Experiment — drive a full chat
