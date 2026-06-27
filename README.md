@@ -104,6 +104,12 @@ Open the URL, type a topic (e.g. *"Design a caching layer for a read-heavy
 API"*), and watch the Researcher → Critic loop and the Summarizer's final
 document stream in.
 
+**Steering a revision:** whenever the Critic votes `REVISE` and another round will
+run, the chat pauses and asks for optional guidance. Type a note to focus the next
+round (it's woven into the ongoing discussion and kept as context), or send
+`skip` to let the agents continue on their own. Your guidance never adds rounds —
+the `MAX_REVIEW_ROUNDS` cap still applies.
+
 ---
 
 ## Skills (Anthropic format)

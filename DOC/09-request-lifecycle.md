@@ -28,6 +28,8 @@ Supervisor.run(task)  ── yields Events ──►  _aiter ──►  Chainlit
    │      • parse_verdict() -> REVISE                      # orchestration/workflow.py
    │      → emits: turn_start, token*, turn_end(verdict=REVISE)
    │   LoopState.should_continue() -> True (REVISE, round<max)
+   │   yield await_input  ──► UI: cl.AskUserMessage ──► gen.send(note)   # optional
+   │      • if note: append Turn("User", …) to transcript (context kept)
    │
    ├─ ROUND 2 ───────────────────────────────────────────────────────────────
    │   Researcher sees the transcript -> REVISED proposal

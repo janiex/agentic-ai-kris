@@ -1,6 +1,7 @@
 """End-to-end orchestration with a fake provider and the in-memory retriever."""
 from __future__ import annotations
 
+from agentic_kris.llm.base import LLMProvider
 from agentic_kris.orchestration.supervisor import Supervisor
 from agentic_kris.rag.memory_store import InMemoryRetriever
 
@@ -45,3 +46,80 @@ def test_researcher_retrieval_is_surfaced(loader, registry):
 def test_tokens_stream(loader, registry):
     events = _run(FakeProvider(["APPROVE"]), loader, registry)
     assert any(e.kind == "token" and e.text for e in events)
+
+
+# ── interactive guidance on REVISE ───────────────────────────────────────────
+class CapturingProvider(LLMProvider):
+    """Like FakeProvider but records each Researcher user-prompt it receives."""
+
+    name = "capturing"
+
+    def __init__(self, verdicts):
+        self.verdicts, self.i = list(verdicts), 0
+        self.researcher_prompts: list[str] = []
+
+    def stream(self, system, messages):
+        user = messages[-1]["content"]
+        if "You are the Critic" in system:
+            v = self.verdicts[min(self.i, len(self.verdicts) - 1)]
+            self.i += 1
+            yield f"review\nVERDICT: {v}"
+        elif "You are the Researcher" in system:
+            self.researcher_prompts.append(user)
+            yield "proposal citing [K1]"
+        else:
+            yield "# Final\n## Recommendation\ndone"
+
+
+def _drive(sup, task, note_at_pause=""):
+    """Drive the resumable generator, sending `note_at_pause` at each pause."""
+    gen = sup.run(task)
+    events = []
+    try:
+        ev = gen.send(None)
+        while True:
+            events.append(ev)
+            ev = gen.send(note_at_pause if ev.kind == "await_input" else None)
+    except StopIteration:
+        pass
+    return events
+
+
+def test_await_input_emitted_between_revise_rounds(loader, registry):
+    sup = Supervisor(provider=FakeProvider(["REVISE", "REVISE", "REVISE"]),
+                     loader=loader, registry=registry, max_rounds=2)
+    events = _drive(sup, "topic")
+    awaits = [e for e in events if e.kind == "await_input"]
+    # max_rounds=2, always REVISE: one pause between round 1 and 2, none after the cap.
+    assert len(awaits) == 1
+    assert awaits[0].round == 1
+    assert _rounds(events) == 2
+
+
+def test_no_await_input_when_approved_first_round(loader, registry):
+    sup = Supervisor(provider=FakeProvider(["APPROVE"]), loader=loader,
+                     registry=registry, retriever=InMemoryRetriever(), max_rounds=3)
+    events = _drive(sup, "topic")
+    assert not any(e.kind == "await_input" for e in events)
+    assert any(e.kind == "final" for e in events)
+
+
+def test_guidance_reaches_next_round_as_context(loader, registry):
+    prov = CapturingProvider(["REVISE", "APPROVE"])
+    sup = Supervisor(provider=prov, loader=loader, registry=registry,
+                     retriever=InMemoryRetriever(), max_rounds=3)
+    events = _drive(sup, "topic", note_at_pause="focus on cost")
+    assert any(e.kind == "await_input" for e in events)
+    # The round-2 Researcher prompt must carry the injected guidance.
+    assert len(prov.researcher_prompts) >= 2
+    assert "focus on cost" in prov.researcher_prompts[1]
+
+
+def test_skipping_guidance_continues_cleanly(loader, registry):
+    prov = CapturingProvider(["REVISE", "APPROVE"])
+    sup = Supervisor(provider=prov, loader=loader, registry=registry,
+                     retriever=InMemoryRetriever(), max_rounds=3)
+    events = _drive(sup, "topic", note_at_pause="")   # user skips
+    assert any(e.kind == "final" for e in events)
+    # No guidance text leaks into the next round when skipped.
+    assert "focus on cost" not in prov.researcher_prompts[1]

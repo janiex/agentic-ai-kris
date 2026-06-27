@@ -43,6 +43,7 @@ The supervisor yields `Event` dataclasses. One flat type keeps consumers simple:
 | `retrieved` | the agent pulled RAG context | `role`, `round`, `docs` |
 | `token` | a streamed chunk of agent output | `role`, `round`, `text` |
 | `turn_end` | an agent turn completes | `role`, `round`, `content`, `verdict` |
+| `await_input` | Critic voted REVISE and another round will run — pause for user guidance | `round`, `content`, `verdict` |
 | `status` | the loop ended; documenting begins | `text` |
 | `final` | the Summarizer's documented answer | `role`, `content` |
 
@@ -85,13 +86,16 @@ event order.
 `Supervisor.run(task, *, user_note="")` is the whole default workflow:
 
 ```
-state = LoopState(max_rounds)
+state = LoopState(max_rounds); pending_note = user_note
 loop:
     state.round += 1
-    Researcher turn  → append to transcript          (yields its events)
-    Critic turn      → parse verdict, append          (yields its events)
-    state.last_verdict = verdict
+    Researcher turn (user_note=pending_note) → append to transcript
+    Critic turn     (user_note=pending_note) → parse verdict, append
+    state.last_verdict = verdict; pending_note = ""
     if not state.should_continue(): break
+    # REVISE + rounds remain → pause for the user:
+    note = (yield await_input)               # send() resumes here
+    if note: transcript.append(User turn); pending_note = note
 status event: "Discussion complete (Critic approved | reached the N-round cap)…"
 Summarizer turn → yields a `final` event with the documented solution
 ```
@@ -101,11 +105,35 @@ Key properties:
 - The Researcher sees the **growing transcript** each round, so round 2+ is a
   *revision* addressing the Critic.
 - The loop stops the instant the Critic approves; otherwise it runs exactly
-  `max_rounds` rounds.
+  `max_rounds` rounds. **User guidance folds into the next round but never adds
+  rounds** — the cap still bounds the loop.
 - The `status` event tells the UI (and the user) *why* the loop ended.
 - For the Summarizer, `_run_turn` yields `turn_start`/`token`s as normal but
   `run` converts its `turn_end` into a `final` event, so the UI can stream the
   final answer into the main message instead of a step.
+
+## 6.5a Interactive revision (human-in-the-loop)
+
+`run` is a **resumable generator**. When the Critic votes REVISE *and* another
+round will run, it yields an `await_input` event **as an expression** and waits
+to receive the user's optional guidance via `generator.send(note)`:
+
+```python
+note = (yield Event("await_input", round=state.round, ...)) or ""
+if note.strip():
+    transcript.append(Turn("User", state.round, note))  # retained as context
+    pending_note = note                                 # emphasised next round
+```
+
+- The guidance is appended to the **transcript** as a `User` turn, so it stays in
+  context for every later turn (the whole discussion is preserved). It's also set
+  as `pending_note` so the *immediate* next round flags it as priority via each
+  agent's `user_note` slot.
+- A plain `for`/`list()` iteration (tests, any non-interactive caller) sends
+  `None` at the pause, so the prompt is simply **skipped** and the loop runs
+  automatically — backward compatible.
+- The UI side (`cl.AskUserMessage` + `gen.send`) is in
+  [08-chainlit-ui.md](08-chainlit-ui.md).
 
 ## 6.6 Why a generator of events?
 
@@ -182,6 +210,49 @@ rounds = [e.round for e in sup.run('topic') if e.kind=='turn_end']
 print('max round reached:', max(rounds))      # -> 2 (the cap)
 "
 ```
+
+### 🧪 Experiment — inject guidance on REVISE (the resumable generator)
+
+Drive the generator manually with `send()` to play the user's role: skip the
+first pause, steer the second. No UI needed.
+
+```bash
+python -c "
+from agentic_kris.orchestration.supervisor import Supervisor
+from agentic_kris.agents.registry import discover
+from agentic_kris.skills.loader import SkillLoader
+from agentic_kris.config import settings
+from agentic_kris.rag.memory_store import InMemoryRetriever
+from agentic_kris.llm.base import LLMProvider
+
+class Prov(LLMProvider):
+    name='fake'
+    def stream(self, system, messages):
+        if 'You are the Critic' in system: yield 'needs work\\nVERDICT: REVISE'
+        elif 'You are the Researcher' in system:
+            # show whether the guidance reached this round's prompt:
+            note = 'cost' if 'cost' in messages[-1]['content'] else '—'
+            yield f'[researcher sees guidance: {note}]'
+        else: yield 'final'
+
+sup = Supervisor(provider=Prov(), loader=SkillLoader(settings.skills_path),
+                 registry=discover(), retriever=InMemoryRetriever(), max_rounds=3)
+gen = sup.run('topic'); ev = gen.send(None); notes = iter(['', 'focus on cost'])
+try:
+    while True:
+        if ev.kind == 'await_input':
+            print(f'  ⏸  pause after round {ev.round} (Critic={ev.verdict})')
+        elif ev.kind == 'turn_end' and ev.role == 'Researcher':
+            print(f'round {ev.round} Researcher -> {ev.content}')
+        ev = gen.send(next(notes) if ev.kind == 'await_input' else None)
+except StopIteration:
+    pass
+"
+```
+
+You'll see the round-3 Researcher report `guidance: cost` (because you sent it at
+the second pause) while round 2 reports `—` (you skipped the first pause) — proof
+the note entered the discussion context only when provided.
 
 ### 🧪 Experiment — verdict parsing edge cases
 

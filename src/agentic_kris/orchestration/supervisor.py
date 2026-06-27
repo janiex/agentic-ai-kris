@@ -109,12 +109,23 @@ class Supervisor:
 
     # ── the orchestrated workflow ────────────────────────────────────────────
     def run(self, task: str, *, user_note: str = "") -> Iterator[Event]:
+        """Drive the workflow, yielding events.
+
+        This is a *resumable* generator. When the Critic votes REVISE and another
+        round will run, it yields an ``await_input`` event **as an expression**
+        and receives the user's optional guidance via ``generator.send(note)``.
+        A plain ``for``/``list`` iteration sends ``None`` at that point, i.e. it
+        simply skips the prompt — so non-interactive callers behave as before.
+        The transcript accumulates across the whole loop, so the discussion
+        context is retained when the user contributes.
+        """
         researcher = self.registry.get("researcher")
         critic = self.registry.get("critic")
         summarizer = self.registry.get("summarizer")
 
         transcript: List[Turn] = []
         state = LoopState(max_rounds=self.max_rounds)
+        pending_note = user_note          # guidance to emphasise for this round
 
         while True:
             state.round += 1
@@ -123,7 +134,7 @@ class Supervisor:
             content = ""
             for ev in self._run_turn(
                 researcher, task=task, transcript=transcript,
-                round=state.round, user_note=user_note,
+                round=state.round, user_note=pending_note,
             ):
                 if ev.kind == "turn_end":
                     content = ev.content
@@ -134,7 +145,7 @@ class Supervisor:
             content, verdict = "", ""
             for ev in self._run_turn(
                 critic, task=task, transcript=transcript,
-                round=state.round, user_note=user_note,
+                round=state.round, user_note=pending_note,
             ):
                 if ev.kind == "turn_end":
                     content, verdict = ev.content, ev.verdict
@@ -142,8 +153,24 @@ class Supervisor:
             transcript.append(Turn(critic.role, state.round, content, verdict=verdict))
             state.last_verdict = verdict
 
+            # The note only emphasises the round it was given for; it stays in the
+            # transcript for lasting context, but isn't re-flagged as priority.
+            pending_note = ""
+
             if not state.should_continue():
                 break
+
+            # Another round will run (verdict REVISE, cap not reached): pause and
+            # let the user steer it. `send(note)` resumes here; `next()` sends None.
+            note = (
+                yield Event(
+                    "await_input", role=critic.role, round=state.round,
+                    content=content, verdict=verdict,
+                )
+            ) or ""
+            if note.strip():
+                transcript.append(Turn("User", state.round, note))
+                pending_note = note
 
         # Tell the UI why the loop ended, then document the outcome.
         reason = "Critic approved" if state.converged else f"reached the {self.max_rounds}-round cap"
