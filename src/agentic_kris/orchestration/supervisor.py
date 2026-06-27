@@ -21,7 +21,7 @@ from ..agents.registry import AgentRegistry
 from ..llm.base import LLMProvider
 from ..rag.retriever import RetrievedDoc, Retriever
 from ..skills.loader import SkillLoader
-from .workflow import LoopState, parse_verdict
+from .workflow import APPROVE, LoopState, parse_verdict
 
 
 # ── events the UI/tests consume ──────────────────────────────────────────────
@@ -33,6 +33,7 @@ class Event:
     text: str = ""                  # token text (token) or message (status)
     content: str = ""               # full turn text (turn_end / final)
     verdict: str = ""
+    at_cap: bool = False            # await_input: the round limit has been reached
     docs: List[RetrievedDoc] = field(default_factory=list)
 
 
@@ -111,13 +112,20 @@ class Supervisor:
     def run(self, task: str, *, user_note: str = "") -> Iterator[Event]:
         """Drive the workflow, yielding events.
 
-        This is a *resumable* generator. When the Critic votes REVISE and another
-        round will run, it yields an ``await_input`` event **as an expression**
-        and receives the user's optional guidance via ``generator.send(note)``.
-        A plain ``for``/``list`` iteration sends ``None`` at that point, i.e. it
-        simply skips the prompt — so non-interactive callers behave as before.
+        This is a *resumable* generator. On **every** REVISE it yields an
+        ``await_input`` event **as an expression** and receives the user's
+        optional guidance via ``generator.send(note)``:
+
+        * below the round cap — the note is optional steering; the loop continues
+          either way;
+        * at the cap (``at_cap=True``) — the cap is a checkpoint: a non-empty note
+          *continues* the discussion (full context kept, ``max_rounds += 1``); an
+          empty/skipped reply *finalizes*.
+
+        A plain ``for``/``list`` iteration sends ``None`` at every pause (i.e.
+        skip), so non-interactive callers still terminate at ``MAX_REVIEW_ROUNDS``.
         The transcript accumulates across the whole loop, so the discussion
-        context is retained when the user contributes.
+        context is retained — including across continuations past the cap.
         """
         researcher = self.registry.get("researcher")
         critic = self.registry.get("critic")
@@ -157,23 +165,34 @@ class Supervisor:
             # transcript for lasting context, but isn't re-flagged as priority.
             pending_note = ""
 
-            if not state.should_continue():
+            if verdict == APPROVE:
                 break
 
-            # Another round will run (verdict REVISE, cap not reached): pause and
-            # let the user steer it. `send(note)` resumes here; `next()` sends None.
+            # REVISE — pause for the user on *every* round. Below the cap this is
+            # optional steering and the loop continues either way. At the cap it
+            # is a checkpoint: input continues the discussion (full context kept,
+            # +1 round), an empty/skipped reply finalizes. `send(note)` resumes
+            # here; `next()`/`list()` send None (i.e. skip).
+            at_cap = state.round >= state.max_rounds
             note = (
                 yield Event(
                     "await_input", role=critic.role, round=state.round,
-                    content=content, verdict=verdict,
+                    content=content, verdict=verdict, at_cap=at_cap,
                 )
             ) or ""
             if note.strip():
                 transcript.append(Turn("User", state.round, note))
                 pending_note = note
+                if at_cap:
+                    state.max_rounds += 1     # the user's input buys another round
+            elif at_cap:
+                break                          # declined to continue → finalize
 
         # Tell the UI why the loop ended, then document the outcome.
-        reason = "Critic approved" if state.converged else f"reached the {self.max_rounds}-round cap"
+        reason = (
+            "Critic approved" if state.converged
+            else f"the discussion ended after {state.round} round(s)"
+        )
         yield Event("status", text=f"Discussion complete ({reason}). Documenting the solution…")
 
         final = ""

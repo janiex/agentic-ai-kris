@@ -43,7 +43,7 @@ The supervisor yields `Event` dataclasses. One flat type keeps consumers simple:
 | `retrieved` | the agent pulled RAG context | `role`, `round`, `docs` |
 | `token` | a streamed chunk of agent output | `role`, `round`, `text` |
 | `turn_end` | an agent turn completes | `role`, `round`, `content`, `verdict` |
-| `await_input` | Critic voted REVISE and another round will run — pause for user guidance | `round`, `content`, `verdict` |
+| `await_input` | Critic voted REVISE — pause for the user (mid-loop guidance, or a continue/finalize checkpoint at the cap) | `round`, `content`, `verdict`, `at_cap` |
 | `status` | the loop ended; documenting begins | `text` |
 | `final` | the Summarizer's documented answer | `role`, `content` |
 
@@ -92,11 +92,16 @@ loop:
     Researcher turn (user_note=pending_note) → append to transcript
     Critic turn     (user_note=pending_note) → parse verdict, append
     state.last_verdict = verdict; pending_note = ""
-    if not state.should_continue(): break
-    # REVISE + rounds remain → pause for the user:
-    note = (yield await_input)               # send() resumes here
-    if note: transcript.append(User turn); pending_note = note
-status event: "Discussion complete (Critic approved | reached the N-round cap)…"
+    if verdict == APPROVE: break
+    at_cap = state.round >= state.max_rounds
+    note = (yield await_input(at_cap))       # send() resumes here
+    if note:
+        transcript.append(User turn); pending_note = note
+        if at_cap: state.max_rounds += 1     # input buys one more round
+    elif at_cap:
+        break                                # skipped at the cap → finalize
+    # else (mid-loop skip) → continue automatically
+status event: "Discussion complete (Critic approved | ended after N rounds)…"
 Summarizer turn → yields a `final` event with the documented solution
 ```
 
@@ -104,34 +109,47 @@ Key properties:
 
 - The Researcher sees the **growing transcript** each round, so round 2+ is a
   *revision* addressing the Critic.
-- The loop stops the instant the Critic approves; otherwise it runs exactly
-  `max_rounds` rounds. **User guidance folds into the next round but never adds
-  rounds** — the cap still bounds the loop.
+- The loop stops the instant the Critic approves.
+- The `max_rounds` cap is a **soft checkpoint**: when it's reached on a REVISE the
+  user is asked to *continue* or *finalize*. Providing input grants exactly **one
+  more round** (and re-asks at the new limit) — the user drives each extension;
+  skipping finalizes. Non-interactive callers skip, so they still stop at the cap.
 - The `status` event tells the UI (and the user) *why* the loop ended.
 - For the Summarizer, `_run_turn` yields `turn_start`/`token`s as normal but
   `run` converts its `turn_end` into a `final` event, so the UI can stream the
   final answer into the main message instead of a step.
 
-## 6.5a Interactive revision (human-in-the-loop)
+## 6.5a Interactive revision + the soft cap (human-in-the-loop)
 
-`run` is a **resumable generator**. When the Critic votes REVISE *and* another
-round will run, it yields an `await_input` event **as an expression** and waits
-to receive the user's optional guidance via `generator.send(note)`:
+`run` is a **resumable generator**. On **every** REVISE it yields an
+`await_input` event **as an expression** and waits to receive the user's reply via
+`generator.send(note)`. The `at_cap` flag distinguishes the two cases:
 
 ```python
-note = (yield Event("await_input", round=state.round, ...)) or ""
+at_cap = state.round >= state.max_rounds
+note = (yield Event("await_input", round=state.round, at_cap=at_cap, ...)) or ""
 if note.strip():
     transcript.append(Turn("User", state.round, note))  # retained as context
     pending_note = note                                 # emphasised next round
+    if at_cap:
+        state.max_rounds += 1                           # input buys one more round
+elif at_cap:
+    break                                               # skipped at cap → finalize
 ```
 
 - The guidance is appended to the **transcript** as a `User` turn, so it stays in
-  context for every later turn (the whole discussion is preserved). It's also set
-  as `pending_note` so the *immediate* next round flags it as priority via each
-  agent's `user_note` slot.
+  context for every later turn — **including continuations past the cap**. The
+  whole discussion (all earlier rounds) is preserved because it's one suspended
+  generator with one growing transcript. It's also set as `pending_note` so the
+  *immediate* next round flags it as priority via each agent's `user_note` slot.
+- **Below the cap** (`at_cap=False`): the note is optional; the loop continues
+  whether or not you provide one.
+- **At the cap** (`at_cap=True`): a non-empty note *continues* the discussion and
+  raises the limit by one (`max_rounds += 1`); the checkpoint re-appears at each
+  new limit, so the user controls every extension. An empty reply *finalizes*.
 - A plain `for`/`list()` iteration (tests, any non-interactive caller) sends
-  `None` at the pause, so the prompt is simply **skipped** and the loop runs
-  automatically — backward compatible.
+  `None` at every pause, so prompts are **skipped** and the loop still terminates
+  at `MAX_REVIEW_ROUNDS` — backward compatible.
 - The UI side (`cl.AskUserMessage` + `gen.send`) is in
   [08-chainlit-ui.md](08-chainlit-ui.md).
 
@@ -244,7 +262,7 @@ try:
             print(f'  ⏸  pause after round {ev.round} (Critic={ev.verdict})')
         elif ev.kind == 'turn_end' and ev.role == 'Researcher':
             print(f'round {ev.round} Researcher -> {ev.content}')
-        ev = gen.send(next(notes) if ev.kind == 'await_input' else None)
+        ev = gen.send(next(notes, '') if ev.kind == 'await_input' else None)
 except StopIteration:
     pass
 "
@@ -252,7 +270,8 @@ except StopIteration:
 
 You'll see the round-3 Researcher report `guidance: cost` (because you sent it at
 the second pause) while round 2 reports `—` (you skipped the first pause) — proof
-the note entered the discussion context only when provided.
+the note entered the discussion context only when provided. (The round-3 cap pause
+is sent `''`, so the discussion then finalizes.)
 
 ### 🧪 Experiment — verdict parsing edge cases
 

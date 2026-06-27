@@ -65,24 +65,34 @@ async def _render_event(ev, ui: dict) -> None:
 
 
 async def _collect_guidance(ev) -> str:
-    """Pause the loop and ask the user for optional guidance before the next round.
+    """Pause the loop and ask the user for input.
 
-    Returns the user's note, or "" if they skip / time out.
+    Below the cap this is optional steering; at the cap (``ev.at_cap``) it decides
+    whether the discussion *continues* (input) or *finalizes* (skip). Returns the
+    user's note, or "" if they skip / time out.
     """
-    res = await cl.AskUserMessage(
-        content=(
+    if ev.at_cap:
+        prompt = (
+            f"🔚 The {ev.round}-round limit is reached and the Critic still wants "
+            f"changes. Send input to **continue** the discussion (the full prior "
+            f"context is kept), or send `skip` to finalize the answer now."
+        )
+    else:
+        prompt = (
             f"🧭 The Critic requested a revision after round {ev.round}. "
             f"Reply with guidance to steer round {ev.round + 1}, or send `skip` "
             "to continue without it."
-        ),
-        timeout=180,
-    ).send()
+        )
+    res = await cl.AskUserMessage(content=prompt, timeout=180).send()
     note = ((res or {}).get("output") or "").strip()
     if not note or note.lower() == "skip":
         return ""
-    await cl.Message(
-        author="You", content=f"🧭 Guidance for round {ev.round + 1}: {note}"
-    ).send()
+    label = (
+        f"▶️ Continuing (round {ev.round + 1}) with: {note}"
+        if ev.at_cap
+        else f"🧭 Guidance for round {ev.round + 1}: {note}"
+    )
+    await cl.Message(author="You", content=label).send()
     return note
 
 
