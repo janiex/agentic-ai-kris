@@ -34,7 +34,7 @@ class OllamaProvider(LLMProvider):
             stream=True,
             timeout=self.timeout,
         )
-        resp.raise_for_status()
+        self._raise_for_status(resp)
         for line in resp.iter_lines():
             if not line:
                 continue
@@ -44,6 +44,31 @@ class OllamaProvider(LLMProvider):
                 yield chunk
             if data.get("done"):
                 break
+
+    def _raise_for_status(self, resp: "requests.Response") -> None:
+        """Raise with Ollama's own error message (e.g. 'model not found').
+
+        Ollama returns a JSON ``{"error": "..."}`` body with a 404 when a model
+        isn't pulled; surfacing it turns an opaque HTTP 404 into an actionable
+        message in the UI.
+        """
+        if resp.ok:
+            return
+        detail = ""
+        try:
+            detail = (resp.json() or {}).get("error", "")
+        except ValueError:
+            detail = (resp.text or "").strip()[:200]
+        hint = ""
+        if resp.status_code == 404 and "model" in detail.lower():
+            hint = (
+                f" — pull it with `ollama pull {self.model}`, or pick a model you "
+                f"already have (`ollama list`)."
+            )
+        raise RuntimeError(
+            f"Ollama request to {resp.url} failed ({resp.status_code}): "
+            f"{detail or resp.reason}{hint}"
+        )
 
     def health_check(self) -> str:
         resp = requests.get(f"{self.host}/api/tags", timeout=10)
