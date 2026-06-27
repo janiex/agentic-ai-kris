@@ -1,0 +1,38 @@
+[project]
+name = "agentic-ai-kris"
+version = "0.1.0"
+description = "An extensible multi-agent system with supervisor orchestration, Anthropic-format Skills, a Chainlit chat UI, and a RAG-ready retrieval seam."
+readme = "README.md"
+# Upper bound: the ASGI stack (uvicorn/starlette/anyio) used by Chainlit does not
+# yet support Python 3.14. Use 3.10–3.13.
+requires-python = ">=3.10,<3.14"
+authors = [{ name = "Kris" }]
+dependencies = [
+    "chainlit>=1.3,<3",       # chat UI
+    "anthropic>=0.40",        # external Claude API provider
+    "requests>=2.31",         # local Ollama REST provider
+    "pydantic-settings>=2.2", # env-driven configuration
+    "pyyaml>=6.0",            # SKILL.md frontmatter parsing
+]
+
+[project.optional-dependencies]
+# Pulled in only when the real RAG backend is implemented (see src/agentic_kris/rag).
+rag = [
+    "sentence-transformers>=2.6",
+    "psycopg2-binary>=2.9",
+    "pgvector>=0.2",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

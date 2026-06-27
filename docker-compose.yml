@@ -1,0 +1,18 @@
+# Postgres + pgvector for the FUTURE RAG backend (see src/agentic_kris/rag).
+# Not required to run the app today — the in-memory retriever is used while
+# RAG_ENABLED=false. Bring this up only when implementing the pgvector backend:
+#   docker compose up -d
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${PGUSER:-agent_user}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-agent_pass}
+      POSTGRES_DB: ${PGDATABASE:-agent_db}
+    ports:
+      - "${PGPORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
