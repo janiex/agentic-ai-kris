@@ -85,15 +85,40 @@ def _drive(sup, task, note_at_pause=""):
     return events
 
 
-def test_await_input_emitted_between_revise_rounds(loader, registry):
+def test_await_input_emitted_on_every_revise(loader, registry):
     sup = Supervisor(provider=FakeProvider(["REVISE", "REVISE", "REVISE"]),
                      loader=loader, registry=registry, max_rounds=2)
-    events = _drive(sup, "topic")
+    events = _drive(sup, "topic")   # skip every pause
     awaits = [e for e in events if e.kind == "await_input"]
-    # max_rounds=2, always REVISE: one pause between round 1 and 2, none after the cap.
-    assert len(awaits) == 1
-    assert awaits[0].round == 1
+    # max_rounds=2, always REVISE, all skipped: a pause each round (mid + cap).
+    assert len(awaits) == 2
+    assert awaits[0].at_cap is False           # round 1: below the cap
+    assert awaits[1].at_cap is True            # round 2: the cap checkpoint
+    assert _rounds(events) == 2                # skipping the cap finalizes at 2
+
+
+def test_cap_continues_with_user_input(loader, registry):
+    prov = CapturingProvider(["REVISE", "REVISE", "APPROVE"])
+    sup = Supervisor(provider=prov, loader=loader, registry=registry,
+                     retriever=InMemoryRetriever(), max_rounds=2)
+    # Provide input at every pause, including the cap → the loop extends past it.
+    events = _drive(sup, "topic", note_at_pause="keep refining the cost model")
+    assert any(e.kind == "await_input" and e.at_cap for e in events)
+    # Extended beyond the original 2-round cap to a 3rd Researcher round...
+    assert len(prov.researcher_prompts) >= 3
+    # ...and the cap-time guidance reached that extra round (context preserved).
+    assert "keep refining the cost model" in prov.researcher_prompts[2]
+    assert any(e.kind == "final" for e in events)
+
+
+def test_cap_finalizes_when_skipped(loader, registry):
+    prov = CapturingProvider(["REVISE", "REVISE", "REVISE"])
+    sup = Supervisor(provider=prov, loader=loader, registry=registry,
+                     retriever=InMemoryRetriever(), max_rounds=2)
+    events = _drive(sup, "topic")              # skip the cap
     assert _rounds(events) == 2
+    assert len(prov.researcher_prompts) == 2   # never extended
+    assert any(e.kind == "final" for e in events)
 
 
 def test_no_await_input_when_approved_first_round(loader, registry):

@@ -92,27 +92,33 @@ chat message instead of a stack trace.
 
 The `await_input` event is handled specially (not in `_render_event`): the loop
 calls `_collect_guidance(ev)`, which prompts the user with `cl.AskUserMessage`
-and returns their note (or `""` if skipped / timed out):
+and returns their note (or `""` if skipped / timed out). It branches on
+`ev.at_cap`:
 
 ```python
-res = await cl.AskUserMessage(
-    content=f"🧭 The Critic requested a revision after round {ev.round}. "
-            f"Reply with guidance to steer round {ev.round + 1}, or send `skip`.",
-    timeout=180,
-).send()
+if ev.at_cap:                       # round limit reached → continue or finalize
+    prompt = (f"🔚 The {ev.round}-round limit is reached and the Critic still "
+              "wants changes. Send input to **continue** the discussion (full "
+              "prior context kept), or send `skip` to finalize now.")
+else:                               # below the cap → optional steering
+    prompt = (f"🧭 The Critic requested a revision after round {ev.round}. "
+              f"Reply with guidance to steer round {ev.round + 1}, or send `skip`.")
+res = await cl.AskUserMessage(content=prompt, timeout=180).send()
 note = ((res or {}).get("output") or "").strip()
 if not note or note.lower() == "skip":
     return ""
-await cl.Message(author="You", content=f"🧭 Guidance for round {ev.round+1}: {note}").send()
+# echo an accepted note back into the thread (▶️ Continuing… / 🧭 Guidance…)
 return note
 ```
 
-The returned note is sent back into the generator via `advance(note)` (§8.4),
-where the supervisor folds it into the next round and the transcript. Because the
-generator is merely *suspended* at the pause (not torn down), the entire prior
-discussion is still in memory — nothing is lost. A skip sends `""`, so the loop
-simply continues. The round cap is unchanged: guidance steers the next round but
-never grants extra rounds.
+The returned note is sent back into the generator via `advance(note)` (§8.4):
+
+- **Below the cap** — the supervisor folds it into the next round and continues.
+- **At the cap** — a non-empty note makes the supervisor grant one more round and
+  continue; an empty reply finalizes. **Continuing past the cap loses no
+  context:** the generator is merely *suspended* at the pause (not torn down), so
+  the entire prior discussion — all earlier rounds — is still in memory and keeps
+  growing in the same transcript.
 
 ## 8.6 Launchers and lifecycle
 

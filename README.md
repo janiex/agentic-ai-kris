@@ -104,11 +104,16 @@ Open the URL, type a topic (e.g. *"Design a caching layer for a read-heavy
 API"*), and watch the Researcher → Critic loop and the Summarizer's final
 document stream in.
 
-**Steering a revision:** whenever the Critic votes `REVISE` and another round will
-run, the chat pauses and asks for optional guidance. Type a note to focus the next
-round (it's woven into the ongoing discussion and kept as context), or send
-`skip` to let the agents continue on their own. Your guidance never adds rounds —
-the `MAX_REVIEW_ROUNDS` cap still applies.
+**Steering a revision:** whenever the Critic votes `REVISE`, the chat pauses and
+asks for input. Below the round limit this is optional guidance — type a note to
+focus the next round (woven into the ongoing discussion and kept as context), or
+send `skip` to let the agents continue on their own.
+
+**At the round limit** (`MAX_REVIEW_ROUNDS`), the pause becomes a checkpoint: send
+input to **continue** the discussion — the full context of all prior rounds is
+preserved and one more round runs — or send `skip` to **finalize** and let the
+Summarizer document the result. You can keep continuing as long as you like; each
+continuation grants one more round, so you stay in control of the length.
 
 ---
 

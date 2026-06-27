@@ -27,14 +27,14 @@ Supervisor.run(task)  ── yields Events ──►  _aiter ──►  Chainlit
    │      • provider.stream(...) -> "...\nVERDICT: REVISE"
    │      • parse_verdict() -> REVISE                      # orchestration/workflow.py
    │      → emits: turn_start, token*, turn_end(verdict=REVISE)
-   │   LoopState.should_continue() -> True (REVISE, round<max)
-   │   yield await_input  ──► UI: cl.AskUserMessage ──► gen.send(note)   # optional
-   │      • if note: append Turn("User", …) to transcript (context kept)
+   │   verdict REVISE → at_cap = round >= max_rounds
+   │   yield await_input(at_cap)  ──► UI: cl.AskUserMessage ──► gen.send(note)
+   │      • below cap: note optional; append Turn("User", …); continue either way
+   │      • AT CAP: note → continue (max_rounds += 1, context kept); skip → finalize
    │
-   ├─ ROUND 2 ───────────────────────────────────────────────────────────────
-   │   Researcher sees the transcript -> REVISED proposal
-   │   Critic -> "VERDICT: APPROVE"
-   │   LoopState.should_continue() -> False (APPROVE)
+   ├─ ROUND 2 … (and any user-granted rounds past the cap) ────────────────────
+   │   Researcher sees the FULL transcript (all earlier rounds) -> REVISED proposal
+   │   Critic -> "VERDICT: APPROVE"  → break
    │
    ├─ status event: "Discussion complete (Critic approved). Documenting…"
    │
