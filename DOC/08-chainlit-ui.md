@@ -41,25 +41,38 @@ in `cl.user_session` and posts "✅ Backend ready…"; on failure (e.g. missing
 Anthropic key) it stores `None` and posts a clear warning, so the app never
 crashes on a bad backend — it just tells you to fix settings.
 
-## 8.4 Bridging sync → async — `_aiter`
+## 8.4 Bridging sync → async — the send-driving loop
 
-`Supervisor.run` is a **synchronous** generator doing blocking network I/O, but
-Chainlit handlers are **async**. `_aiter` iterates the generator one item at a
-time on a worker thread so the event loop stays responsive:
+`Supervisor.run` is a **synchronous, resumable** generator doing blocking network
+I/O, but Chainlit handlers are **async**. `on_message` drives it one event at a
+time on a worker thread (so the event loop stays responsive) and uses
+`generator.send(...)` so it can feed user guidance back in at a pause:
 
 ```python
-async def _aiter(gen):
-    while True:
-        item = await asyncio.to_thread(next, gen, _SENTINEL)
-        if item is _SENTINEL: break
-        yield item
+def advance(value):
+    try:
+        return gen.send(value)        # send(None) == next(); send(note) resumes a pause
+    except StopIteration:
+        return _SENTINEL
+
+ev = await asyncio.to_thread(advance, None)     # prime
+while ev is not _SENTINEL:
+    if ev.kind == "await_input":
+        note = await _collect_guidance(ev)      # cl.AskUserMessage (see 8.5a)
+        ev = await asyncio.to_thread(advance, note)
+        continue
+    await _render_event(ev, ui)
+    ev = await asyncio.to_thread(advance, None)
 ```
 
-This is why a slow LLM call doesn't freeze the UI.
+This is why a slow LLM call doesn't freeze the UI, and why the user can steer a
+revision without the discussion losing context (the generator stays suspended in
+memory across the prompt).
 
-## 8.5 Rendering the event stream — `on_message`
+## 8.5 Rendering the event stream — `_render_event`
 
-Each `Event.kind` maps to a UI action:
+Each non-`await_input` event maps to a UI action (in `_render_event(ev, ui)`,
+where `ui` holds the current step / final message / documenting flag):
 
 | Event | UI action |
 | --- | --- |
@@ -72,8 +85,34 @@ Each `Event.kind` maps to a UI action:
 
 So the Researcher and Critic turns appear as **collapsible steps**, and the
 Summarizer's output streams into the **main answer message**. The whole
-`on_message` body is wrapped in try/except so any backend error surfaces as a
+`on_message` loop is wrapped in try/except so any backend error surfaces as a
 chat message instead of a stack trace.
+
+## 8.5a Collecting guidance — `_collect_guidance`
+
+The `await_input` event is handled specially (not in `_render_event`): the loop
+calls `_collect_guidance(ev)`, which prompts the user with `cl.AskUserMessage`
+and returns their note (or `""` if skipped / timed out):
+
+```python
+res = await cl.AskUserMessage(
+    content=f"🧭 The Critic requested a revision after round {ev.round}. "
+            f"Reply with guidance to steer round {ev.round + 1}, or send `skip`.",
+    timeout=180,
+).send()
+note = ((res or {}).get("output") or "").strip()
+if not note or note.lower() == "skip":
+    return ""
+await cl.Message(author="You", content=f"🧭 Guidance for round {ev.round+1}: {note}").send()
+return note
+```
+
+The returned note is sent back into the generator via `advance(note)` (§8.4),
+where the supervisor folds it into the next round and the transcript. Because the
+generator is merely *suspended* at the pause (not torn down), the entire prior
+discussion is still in memory — nothing is lost. A skip sends `""`, so the loop
+simply continues. The round cap is unchanged: guidance steers the next round but
+never grants extra rounds.
 
 ## 8.6 Launchers and lifecycle
 

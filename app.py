@@ -22,13 +22,68 @@ from agentic_kris.skills.loader import SkillLoader
 _SENTINEL = object()
 
 
-async def _aiter(gen):
-    """Iterate a blocking sync generator without stalling the event loop."""
-    while True:
-        item = await asyncio.to_thread(next, gen, _SENTINEL)
-        if item is _SENTINEL:
-            break
-        yield item
+async def _render_event(ev, ui: dict) -> None:
+    """Render one supervisor Event into the Chainlit UI.
+
+    `ui` carries the mutable rendering state (current step, the final answer
+    message, and whether we've reached the documenting phase).
+    """
+    if ev.kind == "status":
+        ui["documenting"] = True
+        await cl.Message(content=f"_{ev.text}_").send()
+        ui["final_msg"] = cl.Message(content="", author="Summarizer")
+
+    elif ev.kind == "turn_start":
+        if not ui["documenting"]:
+            ui["step"] = cl.Step(name=f"{ev.role} · round {ev.round}", type="llm")
+            await ui["step"].send()
+
+    elif ev.kind == "retrieved":
+        n = len(ev.docs)
+        srcs = ", ".join(str(d.metadata.get("source", "?")) for d in ev.docs) or "—"
+        if ui["step"] is not None:
+            await ui["step"].stream_token(
+                f"🔎 _Retrieved {n} passage(s) from RAG: {srcs}_\n\n"
+            )
+
+    elif ev.kind == "token":
+        if ui["documenting"] and ui["final_msg"] is not None:
+            await ui["final_msg"].stream_token(ev.text)
+        elif ui["step"] is not None:
+            await ui["step"].stream_token(ev.text)
+
+    elif ev.kind == "turn_end":
+        if ui["step"] is not None:
+            if ev.verdict:
+                await ui["step"].stream_token(f"\n\n**VERDICT: {ev.verdict}**")
+            await ui["step"].update()
+            ui["step"] = None
+
+    elif ev.kind == "final":
+        if ui["final_msg"] is not None:
+            await ui["final_msg"].update()
+
+
+async def _collect_guidance(ev) -> str:
+    """Pause the loop and ask the user for optional guidance before the next round.
+
+    Returns the user's note, or "" if they skip / time out.
+    """
+    res = await cl.AskUserMessage(
+        content=(
+            f"🧭 The Critic requested a revision after round {ev.round}. "
+            f"Reply with guidance to steer round {ev.round + 1}, or send `skip` "
+            "to continue without it."
+        ),
+        timeout=180,
+    ).send()
+    note = ((res or {}).get("output") or "").strip()
+    if not note or note.lower() == "skip":
+        return ""
+    await cl.Message(
+        author="You", content=f"🧭 Guidance for round {ev.round + 1}: {note}"
+    ).send()
+    return note
 
 
 def _settings_widgets() -> cl.ChatSettings:
@@ -133,47 +188,23 @@ async def on_message(message: cl.Message):
         return
 
     gen = sup.run(message.content)
-    step: cl.Step | None = None
-    final_msg: cl.Message | None = None
-    documenting = False
+    ui = {"step": None, "final_msg": None, "documenting": False}
+
+    def advance(value):
+        # Drive the resumable generator; send() lets us feed guidance back in.
+        try:
+            return gen.send(value)
+        except StopIteration:
+            return _SENTINEL
 
     try:
-        async for ev in _aiter(gen):
-            if ev.kind == "status":
-                documenting = True
-                await cl.Message(content=f"_{ev.text}_").send()
-                final_msg = cl.Message(content="", author="Summarizer")
-
-            elif ev.kind == "turn_start":
-                if not documenting:
-                    step = cl.Step(name=f"{ev.role} · round {ev.round}", type="llm")
-                    await step.send()
-
-            elif ev.kind == "retrieved":
-                n = len(ev.docs)
-                srcs = ", ".join(
-                    str(d.metadata.get("source", "?")) for d in ev.docs
-                ) or "—"
-                if step is not None:
-                    await step.stream_token(
-                        f"🔎 _Retrieved {n} passage(s) from RAG: {srcs}_\n\n"
-                    )
-
-            elif ev.kind == "token":
-                if documenting and final_msg is not None:
-                    await final_msg.stream_token(ev.text)
-                elif step is not None:
-                    await step.stream_token(ev.text)
-
-            elif ev.kind == "turn_end":
-                if step is not None:
-                    if ev.verdict:
-                        await step.stream_token(f"\n\n**VERDICT: {ev.verdict}**")
-                    await step.update()
-                    step = None
-
-            elif ev.kind == "final":
-                if final_msg is not None:
-                    await final_msg.update()
+        ev = await asyncio.to_thread(advance, None)   # prime the generator
+        while ev is not _SENTINEL:
+            if ev.kind == "await_input":
+                note = await _collect_guidance(ev)
+                ev = await asyncio.to_thread(advance, note)
+                continue
+            await _render_event(ev, ui)
+            ev = await asyncio.to_thread(advance, None)
     except Exception as e:  # noqa: BLE001
         await cl.Message(content=f"⚠️ Error while running the agents: {e}").send()
